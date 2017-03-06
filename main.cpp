@@ -10,6 +10,7 @@
 #include <curl/curl.h>
 #include <cstdlib>
 #include <jpeglib.h>
+#include <png.h>
 
 const int magicPatternNumber = 4;
 const int tileWidth = 64;
@@ -20,6 +21,8 @@ std::mutex runningThreadsMutex;
 std::mutex coutMutex;
 
 bool quiet = false;
+int jpegQuality = 92;
+bool savePNG = true;
 
 struct ImageInfo
 {
@@ -218,7 +221,7 @@ void getImageInfo(std::vector<ImageInfo> &imgInfo, const std::string &chapterURL
 			std::string path = pageList[i]["file"].GetString();
 			int p1 = path.find_last_of('/') + 1;
 			int p2 = path.find_last_of('.');
-			imgInfo[i].name = path.substr(p1, p2 - p1) + ".jpg";
+			imgInfo[i].name = path.substr(p1, p2 - p1);
 			imgInfo[i].url = chapterURL + path + "/0.jpeg";
 			imgInfo[i].pattern = getPattern(path + "/0");
 		}
@@ -246,6 +249,24 @@ void pxcpy(const PixelData &src, PixelData &dest, int srcX, int srcY, int destX,
 	}
 }
 
+bool convertGreyscale(PixelData &image)	// converts to grayscale if the image is grayscale
+{
+	char* greypx = new char[image.width * image.height];
+	for (int i(0); i < image.width * image.height; ++i)
+	{
+		greypx[i] = image.px[i * 3];
+		if (image.px[i * 3] != image.px[i * 3 + 1] || image.px[i * 3 + 1] != image.px[i * 3 + 2])
+		{
+			delete[] greypx;
+			return false;
+		}
+	}
+	delete[] image.px;
+	image.px = greypx;
+	image.components = 1;
+	return true;
+}
+
 void jpeg_load(PixelData &image, char* data, int size)
 {
 	jpeg_decompress_struct cinfo;
@@ -257,7 +278,10 @@ void jpeg_load(PixelData &image, char* data, int size)
 	jpeg_mem_src(&cinfo, (unsigned char*)data, size);
 	jpeg_read_header(&cinfo, TRUE);
 
-	cinfo.out_color_space = cinfo.jpeg_color_space;
+	if (savePNG)
+		cinfo.out_color_space = JCS_RGB;
+	else
+		cinfo.out_color_space = cinfo.jpeg_color_space;
 
 	jpeg_start_decompress(&cinfo);
 
@@ -277,7 +301,7 @@ void jpeg_load(PixelData &image, char* data, int size)
 	jpeg_destroy_decompress(&cinfo);
 }
 
-void jpeg_save(const PixelData &image, const std::string &filename)
+bool jpeg_save(const PixelData &image, const std::string &filename)
 {
 	struct jpeg_compress_struct cinfo;
 	struct jpeg_error_mgr jerr;
@@ -287,9 +311,7 @@ void jpeg_save(const PixelData &image, const std::string &filename)
 
 	FILE * outfile = fopen(filename.c_str(), "wb");
 	if (!outfile)
-	{
-		safe_printline("\nError: Failed to save " + filename);
-	}
+		return false;
 
 	jpeg_stdio_dest(&cinfo, outfile);
 
@@ -299,7 +321,7 @@ void jpeg_save(const PixelData &image, const std::string &filename)
 	cinfo.in_color_space = image.colorSpace;
 
 	jpeg_set_defaults(&cinfo);
-	jpeg_set_quality(&cinfo, 90, TRUE);
+	jpeg_set_quality(&cinfo, jpegQuality, TRUE);
 
 	jpeg_start_compress(&cinfo, TRUE);
 	char* row = image.px;
@@ -312,6 +334,61 @@ void jpeg_save(const PixelData &image, const std::string &filename)
 
 	jpeg_destroy_compress(&cinfo);
 	fclose(outfile);
+	return true;
+}
+
+bool png_save(PixelData &image, const std::string &filename)
+{
+	png_structp png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, (png_voidp)NULL, NULL, NULL);
+	if (!png_ptr)
+		return false;
+
+	png_infop info_ptr = png_create_info_struct(png_ptr);
+	if (!info_ptr)
+	{
+		png_destroy_write_struct(&png_ptr, (png_infopp)NULL);
+		return false;
+	}
+
+	if (setjmp(png_jmpbuf(png_ptr)))
+	{
+		png_destroy_write_struct(&png_ptr, &info_ptr);
+		return false;
+	}
+
+	FILE * outfile = fopen(filename.c_str(), "wb");
+	if (!outfile)
+		return false;
+
+	png_init_io(png_ptr, outfile);
+
+	int color_type = PNG_COLOR_TYPE_RGB;
+	if (convertGreyscale(image))
+		color_type = PNG_COLOR_TYPE_GRAY;
+
+	png_set_IHDR(png_ptr, info_ptr, image.width, image.height, 8, color_type, PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+
+	png_write_info(png_ptr, info_ptr);
+
+	/*char** row_pointers = new char*[image.height];
+	for (int i(0); i < image.height; ++i)
+	row_pointers[i] = image.px + (image.width * image.components) * i;
+	png_write_image(png_ptr, (png_bytepp)row_pointers);
+	delete[] row_pointers;*/
+
+	char* row_pointer = image.px;
+	for (int r(0); r < image.height; ++r)
+	{
+		png_write_row(png_ptr, (png_const_bytep)row_pointer);
+		row_pointer += image.width * image.components;
+	}
+
+	png_write_end(png_ptr, NULL);
+
+	png_destroy_write_struct(&png_ptr, &info_ptr);
+
+	fclose(outfile);
+	return true;
 }
 
 void saveImage(const ImageInfo &info, const std::string &outDir)
@@ -344,10 +421,15 @@ void saveImage(const ImageInfo &info, const std::string &outDir)
 			pxcpy(in, out, t.srcX, t.srcY, t.destX, t.destY, t.width, t.height);
 		//std::cout << "Saving... ";
 
-		jpeg_save(out, outDir + info.name);
+		std::string filename = outDir + info.name + ((savePNG) ? ".png" : ".jpg");
+		bool saveOk = (savePNG) ? png_save(out, filename) : jpeg_save(out, filename);
+		if (!saveOk)
+			safe_printline("Error: Failed to save " + filename);
+		else
+			safe_printline("Saved " + filename);
+
 		delete[] in.px;
 		delete[] out.px;
-		safe_printline("Saved " + info.name);
 	}
 	else
 	{
@@ -379,24 +461,23 @@ void print_help()
 {
 	std::cout << "Usage: comic-earthstar-dl CID [options]\n";
 	std::cout << "Downloads and unscrambles chapters from comic-earthstar.jp\n";
-	std::cout << "Version 0.1.0\n\n";
-	std::cout << "CID       The chapter id. You can find this in the viewer URL.\n";
-	std::cout << "          Example URL:\n";
-	std::cout << "          http://viewer.comic-earthstar.jp/\n";
-	std::cout << "          viewer.html?cid=ede7e2b6d13a41ddf9f4bdef84fdc737&cty=1&lin=0\n";
-	std::cout << "          The CID would be: ede7e2b6d13a41ddf9f4bdef84fdc737\n";
+	std::cout << "Version 0.2.0\n\n";
+	std::cout << "CID           The chapter id. You can find this in the viewer URL.\n";
+	std::cout << "              Example URL:\n";
+	std::cout << "              http://viewer.comic-earthstar.jp/\n";
+	std::cout << "              viewer.html?cid=ede7e2b6d13a41ddf9f4bdef84fdc737&cty=1&lin=0\n";
+	std::cout << "              The CID would be: ede7e2b6d13a41ddf9f4bdef84fdc737\n";
 	std::cout << "Options:\n";
-	std::cout << "-o <dir>  Specify output directory. It should already exist.\n";
-	std::cout << "          Default is current dirrectory.\n";
-	//std::cout << "-t <num>  Specify number of threads to use.\n";
-	//std::cout << "          Default is 6.\n";
-	std::cout << "-q        Quiet. Hides most of the messages.\n";
+	std::cout << "-o <dir>      Specify output directory. It should already exist.\n";
+	std::cout << "              Default is current dirrectory.\n";
+	std::cout << "-j            Save JPEG instead of PNG.\n";
+	std::cout << "-q <quality>  JPEG quality. Default is 92.\n";
+	std::cout << "-s            Silent. Hides most of the messages.\n";
 }
 
 int main(int argc, char** argv)
 {
 	std::string cid, outDir("./");
-	//int threads = std::thread::hardware_concurrency();
 	bool argsOk(false);
 
 	for (int i(1); i < argc; ++i)
@@ -410,12 +491,16 @@ int main(int argc, char** argv)
 				if (outDir.back() != '/' &&outDir.back() != '\\')
 					outDir += '/';
 				break;
-			case 'q':
+			case 's':
 				quiet = true;
 				break;
-				//case 't':
-				//	threads = std::stoi(argv[++i]);
-				//	break;
+			case 'j':
+				savePNG = false;
+				break;
+			case 'q':
+				jpegQuality = std::atoi(argv[++i]);
+				if (jpegQuality == 0) jpegQuality = 90;
+				break;
 			}
 		}
 		else
