@@ -379,7 +379,7 @@ bool png_save(PixelData &image, const std::string &filename)
 	char* row_pointer = image.px;
 	for (int r(0); r < image.height; ++r)
 	{
-		png_write_row(png_ptr, (png_const_bytep)row_pointer);
+		png_write_row(png_ptr, (png_bytep)row_pointer);
 		row_pointer += image.width * image.components;
 	}
 
