@@ -487,7 +487,7 @@ void print_help()
 {
 	std::cout << "Usage: comic-earthstar-dl CID [options]\n";
 	std::cout << "Downloads and unscrambles chapters from comic-earthstar.jp\n";
-	std::cout << "Version 0.2.0\n\n";
+	std::cout << "Version 0.3.0\n\n";
 	std::cout << "CID           The chapter id. You can find this in the viewer URL.\n";
 	std::cout << "              Example URL:\n";
 	std::cout << "              http://viewer.comic-earthstar.jp/\n";
