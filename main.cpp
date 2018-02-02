@@ -29,6 +29,10 @@ struct ImageInfo
 	std::string name;	// name to save unscrambled image as
 	std::string url;	// scrambled image url
 	int pattern;		// used for unscrambling
+	int width;			// unscrambled width
+	int height;			// unscrambled height
+	int x;				// unscrambled x and y offset, always 0 though I think
+	int y;				//
 };
 
 struct PixelData
@@ -224,6 +228,12 @@ void getImageInfo(std::vector<ImageInfo> &imgInfo, const std::string &chapterURL
 			imgInfo[i].name = path.substr(p1, p2 - p1);
 			imgInfo[i].url = chapterURL + path + "/0.jpeg";
 			imgInfo[i].pattern = getPattern(path + "/0");
+
+			const rapidjson::Value& imgRect = document[path.c_str()]["FileLinkInfo"]["PageLinkInfoList"][0]["Page"]["ContentArea"];
+			imgInfo[i].width = imgRect["Width"].GetInt();
+			imgInfo[i].height = imgRect["Height"].GetInt();
+			imgInfo[i].x = imgRect["X"].GetInt();
+			imgInfo[i].y = imgRect["Y"].GetInt();
 		}
 		std::cout << imgInfo.size() << " pages." << std::endl;
 	}
@@ -391,6 +401,20 @@ bool png_save(PixelData &image, const std::string &filename)
 	return true;
 }
 
+void crop(PixelData &img, int x, int y, int width, int height)
+{
+	if ((x + width) <= img.width && (y + height) <= img.height && x >= 0 && y >= 0)
+	{
+		PixelData cropped = img;
+		cropped.width = width;
+		cropped.height = height;
+		cropped.px = new char[cropped.width * cropped.height * cropped.components];
+		pxcpy(img, cropped, x, y, 0, 0, cropped.width, cropped.height);
+		delete[] img.px;
+		img = cropped;
+	}
+}
+
 void saveImage(const ImageInfo &info, const std::string &outDir)
 {
 	CURL *curl;
@@ -411,7 +435,7 @@ void saveImage(const ImageInfo &info, const std::string &outDir)
 		PixelData in, out;
 		jpeg_load(in, data.data(), data.size());
 		out = in;
-		out.px = new char[in.width * in.height * in.components];
+		out.px = new char[out.width * out.height * out.components];
 
 		//std::cout << "Unscrambling... ";
 		std::vector<TileInfo> tiles;
@@ -420,6 +444,8 @@ void saveImage(const ImageInfo &info, const std::string &outDir)
 		for (const TileInfo &t : tiles)
 			pxcpy(in, out, t.srcX, t.srcY, t.destX, t.destY, t.width, t.height);
 		//std::cout << "Saving... ";
+
+		crop(out, info.x, info.y, info.width, info.height);
 
 		std::string filename = outDir + info.name + ((savePNG) ? ".png" : ".jpg");
 		bool saveOk = (savePNG) ? png_save(out, filename) : jpeg_save(out, filename);
